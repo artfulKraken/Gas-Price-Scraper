@@ -1,0 +1,15 @@
+# Config file for Gas_Price_Scraper
+
+#### CHange file name to .config.yml before use
+#### Place file in user home directory in order to use.
+
+general:
+  output: "mysql"
+  #output: "csv"
+csv:
+  filepath: "/path/to/output/file.csv"
+mysql:
+  host: 1.1.1.1
+  port: 3306
+  user: "abc"
+  password: "123"

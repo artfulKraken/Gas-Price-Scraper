@@ -1,0 +1,7 @@
+Data Accuracy Code: Provides information on the accuracy of the Data
+    0 = Actual data for date 
+    1 = Estimated Data using 1 week ago average linearly extrapolated between week ago data and yesterday data
+    2 = Estimated Data using 1 month ago average linearly extrapolated between 1 month ago and 1 week ago data
+    3 = Estimated Data using 1 year ago average linearly extrapolated between 1 year ago and 1 month ago data
+
+    
