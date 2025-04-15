@@ -9,6 +9,9 @@ import requests
 import certifi
 import urllib3
 import yaml
+import logging
+import time
+import mysql.connector
 
 
 ###############################    FUNCTIONS    ##########################################
@@ -40,15 +43,16 @@ def get_existing_csv_data(filepath):
       } )
     existGasData.sort(key=itemgetter("date","MetroArea"))
     lastDate = DT.date.fromisoformat(existGasData[-1]["date"])
-    return ( existGasData, lastDate )
+    return ( existGasData, lastDate, existGasDataHeaderRow )
 
   else:
     ## If file doesnt exist, set lastDate to 7 days ago to use as a starting point for collecting data and existing data to empty list.
     lastDate = DT.date.today() - DT.timedelta(days=7) 
     existGasData = []  
-    return ( existGasData, lastDate )
+    existGasDataHeaderRow = "Date,Region,Regular,Plus,Premium,Data Accuracy\n"
+    return ( existGasData, lastDate, existGasDataHeaderRow )
 
-def insertCsvData( existGasData, lstCAMetroPricing, filepath ):
+def insertCsvData( existGasData, lstCAMetroPricing, filepath, existGasDataHeaderRow):
     # rewrites csv file with existing and new data
     try:
       existGasData.extend(lstCAMetroPricing)
@@ -59,8 +63,68 @@ def insertCsvData( existGasData, lstCAMetroPricing, filepath ):
     f = open(filepath, "w")
     f.write(existGasDataHeaderRow)
     for dataline in existGasData:
-      f.write(",".join([dataline["date"],dataline["MetroArea"],dataline["regular"],dataline["mid"],dataline["premium"],dataline["dataAcc"]])+"\n")
+      f.write(",".join([dataline["date"],dataline["MetroArea"],str(dataline["regular"]), str(dataline["mid"]), str(dataline["premium"]), str(dataline["dataAcc"])])+"\n")
     f.close()
+
+def connect_to_mysql(config, attempts=3, delay=2):
+    
+  sql_config = {
+    'user': config["mysql"]["user"],
+    'password': config["mysql"]["password"],
+    'host': config["mysql"]["host"],
+    'port': config["mysql"]["port"],
+    'database': config["mysql"]["database"],
+    'raise_on_warnings': True
+  }
+  attempt = 1
+  # Implement a reconnection routine
+  while attempt < attempts + 1:
+    try:
+      return mysql.connector.connect(**sql_config)
+    except (mysql.connector.Error, IOError) as err:
+      if (attempts is attempt):
+        # Attempts to reconnect failed; returning None
+        logger.info("Failed to connect, exiting without a connection: %s", err)
+        return None
+      logger.info(
+        "Connection failed: %s. Retrying (%d/%d)...",
+        err,
+        attempt,
+        attempts-1,
+      )
+      # progressive reconnect delay
+      time.sleep(delay ** attempt)
+      attempt += 1
+  return None
+
+def getLastMySqlData( mySqlCnx ):
+  cursor = mySqlCnx.cursor()
+
+  query = ("SELECT date FROM gas_prices WHERE date = ( SELECT MAX(date) FROM gas_prices ) LIMIT 1")
+  cursor.execute(query)
+
+  for date in cursor:
+    last_date = date
+
+  cursor.close()
+  return last_date[0]
+
+def insertMySqlData( lstCAMetroPricing, config ):
+  mySqlCnx = connect_to_mysql(config)
+  if mySqlCnx == None:
+    logger.error("Could not create a mysql database connection")
+    exit(1)
+  
+  cursor = mySqlCnx.cursor()
+  add_gas_price = ("INSERT INTO gas_prices (date, region, regular, plus, premium, accuracy) VALUES ( %s, %s, %s, %s, %s, %s )")
+
+  for dataline in lstCAMetroPricing:
+    dl = (dataline["date"] ,dataline["MetroArea"], dataline["regular"], dataline["mid"], dataline["premium"], dataline["dataAcc"])
+    cursor.execute(add_gas_price, dl)
+  
+  mySqlCnx.commit()
+  cursor.close()
+  mySqlCnx.close()
 
 
 def metroAreaGasPrice(MetroAreaHeaderSoup):
@@ -119,46 +183,46 @@ def extrapGasData(metroAreaData,curDate,lastDate):
             dataList.append({
                 "date": (lastDate + DT.timedelta(days=day)).isoformat(),
                 "MetroArea": metroAreaData[0]["MetroArea"],
-                "regular": "$" + metroAreaData[0]["regular"],
-                "mid": "$" + metroAreaData[0]["mid"],
-                "premium": "$" + metroAreaData[0]["premium"],
-                "dataAcc": str(0)
+                "regular": float(metroAreaData[0]["regular"]),
+                "mid": float(metroAreaData[0]["mid"]),
+                "premium": float(metroAreaData[0]["premium"]),
+                "dataAcc": 0
             })
         elif lastDate + DT.timedelta(days=day) == curDate + DT.timedelta(days=-1):
             dataList.append({
                 "date": (lastDate + DT.timedelta(days=day)).isoformat(),
                 "MetroArea": metroAreaData[1]["MetroArea"],
-                "regular": "$" + metroAreaData[1]["regular"],
-                "mid": "$" + metroAreaData[1]["mid"],
-                "premium": "$" + metroAreaData[1]["premium"],
-                "dataAcc": str(0)
+                "regular": float(metroAreaData[1]["regular"]),
+                "mid": float(metroAreaData[1]["mid"]),
+                "premium": float(metroAreaData[1]["premium"]),
+                "dataAcc": 0
             })
         elif lastDate + DT.timedelta(days=day) >= curDate + DT.timedelta(days=-7):
             dataList.append({
                 "date": (lastDate + DT.timedelta(days=day)).isoformat(),
                 "MetroArea": metroAreaData[2]["MetroArea"],
-                "regular": "$" + str(round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-7))).days*((float(metroAreaData[1]["regular"])-float(metroAreaData[2]["regular"]))/6)+float(metroAreaData[2]["regular"]),3)),
-                "mid": "$" + str(round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-7))).days*((float(metroAreaData[1]["mid"])-float(metroAreaData[2]["mid"]))/6)+float(metroAreaData[2]["mid"]),3)),
-                "premium": "$" + str(round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-7))).days*((float(metroAreaData[1]["premium"])-float(metroAreaData[2]["premium"]))/6)+float(metroAreaData[2]["premium"]),3)),
-                "dataAcc": str(1)
+                "regular": round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-7))).days*((float(metroAreaData[1]["regular"])-float(metroAreaData[2]["regular"]))/6)+float(metroAreaData[2]["regular"]),3),
+                "mid": round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-7))).days*((float(metroAreaData[1]["mid"])-float(metroAreaData[2]["mid"]))/6)+float(metroAreaData[2]["mid"]),3),
+                "premium": round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-7))).days*((float(metroAreaData[1]["premium"])-float(metroAreaData[2]["premium"]))/6)+float(metroAreaData[2]["premium"]),3),
+                "dataAcc": 1
             })
         elif lastDate + DT.timedelta(days=day) >= curDate + DT.timedelta(days=-30):
             dataList.append({
                 "date": (lastDate + DT.timedelta(days=day)).isoformat(),
                 "MetroArea": metroAreaData[3]["MetroArea"],
-                "regular": "$" + str(round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-30))).days*((float(metroAreaData[2]["regular"])-float(metroAreaData[3]["regular"]))/23)+float(metroAreaData[3]["regular"]),3)),
-                "mid": "$" + str(round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-30))).days*((float(metroAreaData[2]["mid"])-float(metroAreaData[3]["mid"]))/23)+float(metroAreaData[3]["mid"]),3)),
-                "premium": "$" + str(round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-30))).days*((float(metroAreaData[2]["premium"])-float(metroAreaData[3]["premium"]))/23)+float(metroAreaData[3]["premium"]),3)),
-                "dataAcc": str(2)
+                "regular": round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-30))).days*((float(metroAreaData[2]["regular"])-float(metroAreaData[3]["regular"]))/23)+float(metroAreaData[3]["regular"]),3),
+                "mid": round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-30))).days*((float(metroAreaData[2]["mid"])-float(metroAreaData[3]["mid"]))/23)+float(metroAreaData[3]["mid"]),3),
+                "premium": round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-30))).days*((float(metroAreaData[2]["premium"])-float(metroAreaData[3]["premium"]))/23)+float(metroAreaData[3]["premium"]),3),
+                "dataAcc": 2
             })
         elif lastDate + DT.timedelta(days=day) >= curDate + DT.timedelta(days=-365):
             dataList.append({
                 "date": (lastDate + DT.timedelta(days=day)).isoformat(),
                 "MetroArea": metroAreaData[4]["MetroArea"],
-                "regular": "$" + str(round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-365))).days*((float(metroAreaData[3]["regular"])-float(metroAreaData[4]["regular"]))/335)+float(metroAreaData[4]["regular"]),3)),
-                "mid": "$" + str(round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-365))).days*((float(metroAreaData[3]["mid"])-float(metroAreaData[4]["mid"]))/335)+float(metroAreaData[4]["mid"]),3)),
-                "premium": "$" + str(round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-365))).days*((float(metroAreaData[3]["premium"])-float(metroAreaData[4]["premium"]))/335)+float(metroAreaData[4]["premium"]),3)),
-                "dataAcc": str(3)
+                "regular": round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-365))).days*((float(metroAreaData[3]["regular"])-float(metroAreaData[4]["regular"]))/335)+float(metroAreaData[4]["regular"]),3),
+                "mid": round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-365))).days*((float(metroAreaData[3]["mid"])-float(metroAreaData[4]["mid"]))/335)+float(metroAreaData[4]["mid"]),3),
+                "premium": round((lastDate+DT.timedelta(days=day) - (curDate+DT.timedelta(days=-365))).days*((float(metroAreaData[3]["premium"])-float(metroAreaData[4]["premium"]))/335)+float(metroAreaData[4]["premium"]),3),
+                "dataAcc": 3
             })
     return dataList
 
@@ -166,24 +230,46 @@ def extrapGasData(metroAreaData,curDate,lastDate):
 
 ###############################  End FUNCTIONS  ##########################################
 
-
+### MAIN #####
 
 #import yaml config file
 config = importConfig()
+
+# Set up logger
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+# Log to console
+handler = logging.StreamHandler()
+handler.setFormatter(formatter)
+logger.addHandler(handler)
+
+# log to a file
+file_handler = logging.FileHandler( config[ "logging" ][ "filepath" ] )
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler) 
 
 GasPriceURL = config["general"]["GasPriceURL"]
 
 #### get existing data from csv or most recent data from mysql, depending on config settings.  exit if incorrect output value (not csv or mysql)
 
 if config["general"]["output"] == 'mysql':
-  lastDate = getLastMySqlData(  )
+  mySqlCnx = connect_to_mysql(config)
+  if mySqlCnx == None:
+    logger.error("Could not create a mysql database connection")
+    exit(1)
+  lastDate = getLastMySqlData( mySqlCnx )
+  mySqlCnx.close()
+
 elif config["general"]["output"] == 'csv':
   tupLastData = get_existing_csv_data( config["csv"]["filepath"] )
   existGasData = tupLastData[0]
   lastDate = tupLastData[1]
+  existGasDataHeaderRow = tupLastData[2]
 
 else:
-  print('Invalid Config "output" option.  Program exiting')
+  logger.error("Invalid config output option")
   exit(1)
 
 
@@ -221,6 +307,6 @@ if curDate != lastDate:
   lstCAMetroPricing.sort(key=itemgetter("date","MetroArea"))
 
   if config["general"]["output"] == 'mysql':
-    insertMySqlData(  )
+    insertMySqlData( lstCAMetroPricing, config )
   elif config["general"]["output"] == 'csv':
-    insertCsvData( existGasData, lstCAMetroPricing, config["csv"]["filepath"] )
+    insertCsvData( existGasData, lstCAMetroPricing, config["csv"]["filepath"], existGasDataHeaderRow )

@@ -4,6 +4,7 @@
 #### Place file in user home directory in order to use.
 
 general:
+  GasPriceURL: "https://gasprices.aaa.com/?state=CA#state-metro"
   output: "mysql"
   #output: "csv"
 csv:
@@ -13,3 +14,6 @@ mysql:
   port: 3306
   user: "abc"
   password: "123"
+  database: "ev_tracking"
+logging:
+  filepath: "/path/to/log/file.log"
